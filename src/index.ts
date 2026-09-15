@@ -24,7 +24,7 @@ export type HEPState = string;
 export type HEPMech = string;
 export type HEPDir = string;
 
-export interface HEPEvent { seq: number; prev: string; type: string; ts: string; payload: unknown; hash: string; }
+export interface HEPEvent { seq: number; prev: string; type: string; ts: string; payload: unknown; hash: string; v?: number; }
 export interface HypRecord {
   statement: string; prior: number; mechanism: string; parents: string[];
   state: string; belief: number; evidence: unknown[]; generation: number;
@@ -54,6 +54,22 @@ function resolveTs(ts?: string): string {
   return d.toISOString();
 }
 function hid(): string { return `hyp_${randomBytes(3).toString("hex")}`; }
+
+/** Chain version of NEW events. v1 (0.1.2 and earlier, and the Python `hep.py`) hashed
+ *  `prev + payload` only, which left `ts` and `type` OUTSIDE the chain: the timeline
+ *  (and the kind of an event) could be rewritten without `verify` noticing. v2 hashes
+ *  the whole event, minus the hash itself. */
+const CHAIN_V2 = 2;
+
+/** Canonical hash input. Version-aware so registries written by v1 stay verifiable:
+ *  a legacy event is checked with the weaker rule it was written under, and `verify`
+ *  reports how many those were (a weaker guarantee is reported, not hidden). */
+function eventHash(e: { seq: number; prev: string; type: string; ts: string; payload: unknown; v?: number }): string {
+  const body = (e.v ?? 1) >= CHAIN_V2
+    ? stableStringify({ v: e.v, seq: e.seq, type: e.type, ts: e.ts, payload: e.payload })
+    : stableStringify(e.payload);
+  return createHash("sha256").update(`${e.prev}${body}`).digest("hex");
+}
 
 function stableStringify(v: unknown): string {
   // `undefined` must be handled EXPLICITLY: JSON.stringify(undefined) returns the
@@ -103,9 +119,9 @@ export class HEP {
 
   private append(etype: string, payload: unknown, ts?: string): HEPEvent {
     this.seq += 1;
-    const ev: HEPEvent = { seq: this.seq, prev: this.prev, type: etype, ts: resolveTs(ts), payload, hash: "" };
-    const h = createHash("sha256").update(`${this.prev}${stableStringify(payload)}`).digest("hex");
-    ev.hash = h;
+    const base = { seq: this.seq, prev: this.prev, type: etype, ts: resolveTs(ts), payload, v: CHAIN_V2 };
+    const h = eventHash(base);
+    const ev: HEPEvent = { ...base, hash: h };
     appendFileSync(this.path, `${JSON.stringify(ev)}\n`);
     this.prev = h;
     return ev;
@@ -258,20 +274,22 @@ export class HEP {
     return hyps;
   }
 
-  verify(): { ok: boolean; badSeq?: number } {
-    if (!existsSync(this.path)) return { ok: true };
+  verify(): { ok: boolean; badSeq?: number; legacy?: number } {
+    if (!existsSync(this.path)) return { ok: true, legacy: 0 };
     let prev = "0".repeat(64);
     const raw = readFileSync(this.path, "utf8");
     let seq = 0;
+    let legacy = 0;
     for (const line of raw.split("\n")) {
       const s = line.trim(); if (!s) continue;
       let e: HEPEvent; try { e = JSON.parse(s) as HEPEvent; } catch { return { ok: false, badSeq: seq + 1 }; }
       seq += 1;
       if (e.seq !== seq || e.prev !== prev) return { ok: false, badSeq: e.seq };
-      const exp = createHash("sha256").update(`${prev}${stableStringify(e.payload)}`).digest("hex");
+      const exp = eventHash(e);
+      if ((e.v ?? 1) < CHAIN_V2) legacy += 1;
       if (e.hash !== exp) return { ok: false, badSeq: e.seq };
       prev = e.hash;
     }
-    return { ok: true };
+    return { ok: true, legacy };
   }
 }
