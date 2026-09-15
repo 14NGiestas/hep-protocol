@@ -1,0 +1,40 @@
+{
+  "name": "hep-protocol",
+  "version": "0.1.3",
+  "description": "Hypothesis Evolution Protocol \u2014 auditable event-sourced registry (arXiv:2607.09195v1)",
+  "type": "module",
+  "bin": {
+    "hep": "dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "test": "node --test",
+    "prepublishOnly": "tsc"
+  },
+  "keywords": [
+    "hep",
+    "hypothesis",
+    "auditable",
+    "ai-scientist",
+    "arxiv:2607.09195"
+  ],
+  "license": "MIT",
+  "author": "Ian Giestas Pauli <iangiestaspauli@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/14NGiestas/hep-protocol.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}
