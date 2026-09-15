@@ -14,6 +14,7 @@ Usage:
   hep transition --hyp hyp_XXXX --state supported|refuted|dormant|under_test|proposed
   hep list [--json]
   hep get --hyp hyp_XXXX
+  hep attachments [--check]  # regenera (ou confere) o indice de anexos do registry
   hep verify
   hep status
   hep tree [--registry PATH] [--type auto|hep|ckpt] [--no-color]
@@ -27,6 +28,12 @@ function arg(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 function flag(name: string): boolean { return process.argv.includes(`--${name}`); }
+/** Todas as ocorrencias de `--name v` (para flags repetiveis, como `--file`). */
+function argAll(name: string): string[] {
+  const out: string[] = [];
+  process.argv.forEach((a, i) => { if (a === `--${name}` && process.argv[i + 1]) out.push(process.argv[i + 1]); });
+  return out;
+}
 
 const cmd = process.argv[2];
 const at = arg("at");
@@ -49,7 +56,7 @@ try {
     const rationale = arg("rationale");
     if (!hyp || !direction || !prior || !updated || !rationale) throw new Error("--hyp --direction --prior --updated --rationale required");
     const validated = !flag("no-validate");
-    const ev = h.attachEvidence(hyp, kind, direction, Number(prior), Number(updated), rationale, arg("source") ?? "", validated, arg("bpb") ? Number(arg("bpb")) : null, arg("commit") ?? "", at);
+    const ev = h.attachEvidence(hyp, kind, direction, Number(prior), Number(updated), rationale, arg("source") ?? "", validated, arg("bpb") ? Number(arg("bpb")) : null, arg("commit") ?? "", at, argAll("file"));
     console.log(`evidence recorded for ${hyp} (${(ev.payload as Record<string, unknown>)["direction"]}, validated=${validated})`);
   } else if (cmd === "refine") {
     const parent = arg("parent"); const statement = arg("statement"); const prior = arg("prior");
@@ -67,6 +74,18 @@ try {
     if (!hyp || !state) throw new Error("--hyp and --state required");
     h.transition(hyp, state, at);
     console.log(`transitioned ${hyp} -> ${state}`);
+  } else if (cmd === "attachments") {
+    if (flag("check")) {
+      const r = h.checkAttachments();
+      console.log(`checked ${r.checked} attachment pointer(s)`);
+      if (!r.ok) {
+        for (const b of r.bad) console.error(`BAD ${b.hyp} ${b.path} (${b.why})`);
+        process.exit(1);
+      }
+      console.log("all attachments match their recorded sha256");
+    } else {
+      console.log(`wrote ${h.rebuildAttachmentsIndex()} pointer(s) to the attachment index`);
+    }
   } else if (cmd === "list" || cmd === "status") {
     const s = h.status();
     if (flag("json")) { console.log(JSON.stringify(s, null, 2)); }

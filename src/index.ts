@@ -12,7 +12,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export const VALID_STATES = new Set(["proposed", "under_test", "supported", "refuted", "dormant"] as const);
@@ -54,6 +54,24 @@ function resolveTs(ts?: string): string {
   return d.toISOString();
 }
 function hid(): string { return `hyp_${randomBytes(3).toString("hex")}`; }
+
+/** Pointer de CONTEUDO para um anexo (mesma ideia dos git-lfs pointers: sha256 + size).
+ *  Por que o evento carrega isto INLINE, e nao so' um caminho: um `--source` e' um
+ *  ponteiro sem prova de conteudo -- mexer no arquivo nao aparece em lugar nenhum, e a
+ *  prosa/anexos ficam fora da cadeia de hashes. Com o pointer dentro do payload, a
+ *  propria cadeia cobre o anexo: editar o arquivo passa a ser DETECTAVEL por
+ *  [[checkAttachments]], e a tabela ao lado do registry vira so' um indice
+ *  reconstruivel (nunca uma fonte de confianca). */
+export interface AttachmentPointer { path: string; sha256: string; size: number; }
+
+function pointerOf(path: string): AttachmentPointer {
+  const bytes = readFileSync(path);
+  return { path, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length };
+}
+
+function attachmentsPathOf(registry: string): string {
+  return join(dirname(registry), "attachments.jsonl");
+}
 
 /** Chain version of NEW events. v1 (0.1.2 and earlier, and the Python `hep.py`) hashed
  *  `prev + payload` only, which left `ts` and `type` OUTSIDE the chain: the timeline
@@ -181,12 +199,19 @@ export class HEP {
    * For computational/analytical evidence, agent must certify trustworthy (diagnostic);
    * uncertified is recorded as insufficient and leaves belief unchanged.
    */
-  attachEvidence(hyp: string, kind: string, direction: string, prior: number, updated: number, rationale: string, source = "", validated = true, bpb: number | null = null, commit = "", ts?: string): HEPEvent {
+  attachEvidence(hyp: string, kind: string, direction: string, prior: number, updated: number, rationale: string, source = "", validated = true, bpb: number | null = null, commit = "", ts?: string, files: string[] = []): HEPEvent {
     if (!VALID_DIR.has(direction as never)) throw new Error(`direction must be one of ${[...VALID_DIR].join(", ")}`);
     const needsValidation = kind === "simulation" || kind === "experiment" || kind === "analysis";
     const effectiveUpdated = needsValidation && !validated ? Number(prior) : Number(updated);
     const payload: Record<string, unknown> = { hyp, kind, direction, prior: Number(prior), updated: effectiveUpdated, bpb, commit, rationale, source, validated, insufficient: needsValidation && !validated };
     // keep alias "evidence" for backward compat with hep.py logs
+    if (files.length) {
+      const ap = files.map(pointerOf);
+      (payload as Record<string, unknown>).attachments = ap;
+      // indice ao lado do registry: conveniencia reconstruivel, nao fonte de confianca
+      appendFileSync(attachmentsPathOf(this.path),
+        ap.map((a) => JSON.stringify({ hyp, ...a })).join("\n") + "\n");
+    }
     return this.append("evidence", payload, ts);
   }
   attach_evidence = this.attachEvidence;
@@ -272,6 +297,46 @@ export class HEP {
       }
     }
     return hyps;
+  }
+
+  /** Reconfere TODO pointer de anexo do registry contra os arquivos em disco.
+   *  E' a guarda que faltava: a prosa e os anexos nao estao na cadeia, mas os seus
+   *  sha256 estao -- entao editar um anexo (ou um documento) passa a ser detectavel. */
+  checkAttachments(): { ok: boolean; checked: number; bad: { hyp: string; path: string; why: string }[] } {
+    const bad: { hyp: string; path: string; why: string }[] = [];
+    let checked = 0;
+    if (!existsSync(this.path)) return { ok: true, checked: 0, bad };
+    for (const line of readFileSync(this.path, "utf8").split("\n")) {
+      const s = line.trim(); if (!s) continue;
+      let e: HEPEvent; try { e = JSON.parse(s) as HEPEvent; } catch { continue; }
+      const at = (e.payload as { attachments?: AttachmentPointer[] })?.attachments;
+      const hyp = (e.payload as { hyp?: string })?.hyp ?? "?";
+      for (const a of at ?? []) {
+        checked += 1;
+        if (!existsSync(a.path)) { bad.push({ hyp, path: a.path, why: "sumiu" }); continue; }
+        const now = pointerOf(a.path);
+        if (now.sha256 !== a.sha256) bad.push({ hyp, path: a.path, why: "conteudo mudou" });
+        else if (now.size !== a.size) bad.push({ hyp, path: a.path, why: "tamanho diferente" });
+      }
+    }
+    return { ok: bad.length === 0, checked, bad };
+  }
+
+  /** Regenera o indice de anexos a partir dos EVENTOS (a tabela e' derivada, entao
+   *  adulterar a tabela nao adianta: a verdade esta' no payload, dentro da cadeia). */
+  rebuildAttachmentsIndex(): number {
+    const out: string[] = [];
+    if (existsSync(this.path)) {
+      for (const line of readFileSync(this.path, "utf8").split("\n")) {
+        const s = line.trim(); if (!s) continue;
+        let e: HEPEvent; try { e = JSON.parse(s) as HEPEvent; } catch { continue; }
+        const at = (e.payload as { attachments?: AttachmentPointer[] })?.attachments ?? [];
+        const hyp = (e.payload as { hyp?: string })?.hyp ?? "?";
+        for (const a of at) out.push(JSON.stringify({ hyp, ...a }));
+      }
+    }
+    writeFileSync(attachmentsPathOf(this.path), out.length ? out.join("\n") + "\n" : "");
+    return out.length;
   }
 
   verify(): { ok: boolean; badSeq?: number; legacy?: number } {
